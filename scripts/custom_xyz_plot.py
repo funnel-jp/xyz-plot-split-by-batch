@@ -425,7 +425,16 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
 
         def cell(x, y, z, ix, iy, iz):
             if shared.state.interrupted or state.stopping_generation: return Processed(p, [], p.seed, "")
-            pc = copy(p); pc.styles = pc.styles[:]
+            pc = copy(p)
+            # Forge/SDXLでのキャッシュ汚染によるTensorサイズ不整合エラーを回避するため、
+            # キャッシュを明示的に初期化します。
+            if hasattr(pc, 'cached_c'):
+                pc.cached_c = [None, None, None, None]
+            if hasattr(pc, 'cached_uc'):
+                pc.cached_uc = [None, None, None, None]
+            if hasattr(pc, 'extra_network_data'):
+                pc.extra_network_data = None
+            pc.styles = pc.styles[:]
             x_opt.apply(pc, x, xs); y_opt.apply(pc, y, ys); z_opt.apply(pc, z, zs)
             xdim = len(xs) if vary_seeds_x else 1; ydim = len(ys) if vary_seeds_y else 1
             if vary_seeds_x: pc.seed += ix
