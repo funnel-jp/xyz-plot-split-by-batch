@@ -28,7 +28,7 @@ import traceback
 # UI用のアイコン
 fill_values_symbol = "\U0001f4d2"  # 📒
 
-# --- ▼▼▼ 改造版の関数定義 (v7と同じ) ▼▼▼ ---
+# --- ▼▼▼ 改造版の関数定義▼▼▼ ---
 
 def draw_xyz_grid_unified(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, margin_size, draw_legend_x, draw_legend_y, draw_legend_z, draw_legend_batch, include_sub_grids, split_grids_by_batch):
     """
@@ -426,14 +426,41 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
         def cell(x, y, z, ix, iy, iz):
             if shared.state.interrupted or state.stopping_generation: return Processed(p, [], p.seed, "")
             pc = copy(p)
-            # Forge/SDXLでのキャッシュ汚染によるTensorサイズ不整合エラーを回避するため、
-            # キャッシュを明示的に初期化します。
-            if hasattr(pc, 'cached_c'):
-                pc.cached_c = [None, None, None, None]
-            if hasattr(pc, 'cached_uc'):
-                pc.cached_uc = [None, None, None, None]
-            if hasattr(pc, 'extra_network_data'):
-                pc.extra_network_data = None
+            
+            # --- Forge/SDXL キャッシュ汚染 & 参照共有回避のための強力な初期化 (修正版) ---
+            # 1. キャッシュの完全消去
+            pc.cached_c = [None, None]
+            pc.cached_uc = [None, None]
+            if hasattr(pc, 'cached_hr_c'):  pc.cached_hr_c = [None, None]
+            if hasattr(pc, 'cached_hr_uc'): pc.cached_hr_uc = [None, None]
+            
+            # 2. ネットワークデータの参照切り離し
+            pc.extra_network_data = None
+
+            # 3. プロンプト・シードリストの参照切り離しと安全な初期化
+            #    p.all_prompts が None の場合は、単一の prompt からリストを作成して初期化します。
+            #    これにより 'NoneType is not iterable' エラーを回避しつつ、参照共有を断ち切ります。
+            if p.all_prompts:
+                pc.all_prompts = list(p.all_prompts)
+            else:
+                pc.all_prompts = [p.prompt] * p.batch_size
+
+            if p.all_negative_prompts:
+                pc.all_negative_prompts = list(p.all_negative_prompts)
+            else:
+                pc.all_negative_prompts = [p.negative_prompt] * p.batch_size
+
+            if p.all_seeds:
+                pc.all_seeds = list(p.all_seeds)
+            else:
+                pc.all_seeds = [p.seed] * p.batch_size
+
+            if p.all_subseeds:
+                pc.all_subseeds = list(p.all_subseeds)
+            else:
+                pc.all_subseeds = [p.subseed] * p.batch_size
+            # -----------------------------------------------------------
+
             pc.styles = pc.styles[:]
             x_opt.apply(pc, x, xs); y_opt.apply(pc, y, ys); z_opt.apply(pc, z, zs)
             xdim = len(xs) if vary_seeds_x else 1; ydim = len(ys) if vary_seeds_y else 1
@@ -535,9 +562,6 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
     
     print("[XYZ Plot Mods] Patches applied successfully.")
 
-
-# --- ▼▼▼ パッチ適用のエントリーポイント (v8.1 - 修正版) ▼▼▼ ---
-
 def on_scripts_loaded():
     """
     すべてのスクリプトが読み込まれた後に呼び出されるコールバック関数。
@@ -550,11 +574,9 @@ def on_scripts_loaded():
         original_script_class = None
         original_xyz_grid_module = None
 
-        # --- ▼▼▼ 修正点 ▼▼▼ ---
         # 'modules.scripts' ではなく、インポートしたエイリアス 'scripts' を使用する
         if hasattr(scripts, "scripts_data") and isinstance(scripts.scripts_data, list):
             for data in scripts.scripts_data:
-        # --- ▲▲▲ 修正点 ▲▲▲ ---
         
                 if not hasattr(data, "script_class"):
                     continue
@@ -587,5 +609,4 @@ def on_scripts_loaded():
         traceback.print_exc()
 
 # --- コールバックを登録 ---
-# (ここは変更ありません)
 script_callbacks.on_ui_settings(on_scripts_loaded)
