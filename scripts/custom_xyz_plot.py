@@ -1,9 +1,3 @@
-"""
-This script patches the built-in X/Y/Z Plot script to add custom features.
-This version (v8) uses script_callbacks to apply the patch after all scripts have been loaded,
-which should prevent UI duplication issues.
-"""
-
 from collections import namedtuple
 from copy import copy
 from itertools import permutations, chain
@@ -25,28 +19,27 @@ from modules.ui_components import ToolButton, InputAccordion
 import importlib
 import traceback
 
-# UI用のアイコン
+# UI用アイコン
 fill_values_symbol = "\U0001f4d2"  # 📒
 
-# --- ▼▼▼ 改造版の関数定義▼▼▼ ---
+# --- ▼▼▼ 改造版の関数定義 ▼▼▼ ---
 
 def draw_xyz_grid_unified(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, margin_size, draw_legend_x, draw_legend_y, draw_legend_z, draw_legend_batch, include_sub_grids, split_grids_by_batch):
-    """
-    【統合版】グリッド描画関数。
-    (xyz_grid.py (修正済み) からコピー)
-    """
-    
     batch_size = p.batch_size
     num_cells_total = len(xs) * len(ys) * len(zs)
-    
     state.job_count = num_cells_total * p.n_iter
-
-    # --- 1. 全ての個別画像（またはセルグリッド）を収集する ---
     
-    processed_template = None
-    num_containers = batch_size if split_grids_by_batch and batch_size > 1 else 1
-    batch_processed_results = []
+    # 全セルの「純粋な個別画像とメタデータ」を保持するリスト
+    all_cell_images = []
+    all_cell_prompts = []
+    all_cell_seeds = []
+    all_cell_subseeds = []
+    all_cell_negative_prompts = []
+    all_cell_infotexts = []
 
+    processed_template = None
+
+    # --- 1. 生成ループ：全セルの画像をひたすら集める ---
     for iz, z in enumerate(zs):
         for iy, y in enumerate(ys):
             for ix, x in enumerate(xs):
@@ -57,149 +50,154 @@ def draw_xyz_grid_unified(p, xs, ys, zs, x_labels, y_labels, z_labels, cell, mar
                     if not processed_cell_result.images:
                         raise RuntimeError("The first cell failed to produce any images.")
                     processed_template = copy(processed_cell_result)
-                    
-                    ref_image_index = 0 if batch_size == 1 else 1
-                    if len(processed_cell_result.images) <= ref_image_index:
-                         raise RuntimeError(f"Unexpected number of images returned by process_images: {len(processed_cell_result.images)}")
-                    ref_image_mode = processed_template.images[ref_image_index].mode
-                    ref_image_size = processed_template.images[ref_image_index].size
-                    
-                    for i in range(num_containers):
-                        res = copy(processed_template)
-                        res.images = [Image.new(ref_image_mode, ref_image_size)] * num_cells_total
-                        res.all_prompts = [""] * num_cells_total
-                        res.all_negative_prompts = [""] * num_cells_total
-                        res.all_seeds = [-1] * num_cells_total
-                        res.all_subseeds = [-1] * num_cells_total
-                        res.infotexts = [""] * num_cells_total
-                        batch_processed_results.append(res)
 
                 if processed_cell_result.images:
-                    grid_index = ix + iy * len(xs) + iz * len(xs) * len(ys)
+                    # プレビュー画像等の混入を避けるため純粋な生成画像のみを抽出
+                    idx_first = getattr(processed_cell_result, 'index_of_first_image', 0)
+                    lone_imgs = processed_cell_result.images[idx_first:]
+                    n = len(lone_imgs)
                     
-                    images_to_collect = []
-                    if batch_size == 1:
-                        images_to_collect = processed_cell_result.images # [0]
-                    elif split_grids_by_batch:
-                        images_to_collect = processed_cell_result.images[1:] # [1:]
-                    else:
-                        images_to_collect = processed_cell_result.images[0:1] # [0]
+                    def get_meta(lst, default_val):
+                        if not lst: return [default_val] * n
+                        res = lst[idx_first:idx_first+n]
+                        if len(res) < n:
+                            res.extend([lst[-1] if lst else default_val] * (n - len(res)))
+                        return res
 
-                    for i in range(num_containers):
-                        current_container_index = i if split_grids_by_batch and batch_size > 1 else 0
-                        
-                        if i < len(images_to_collect):
-                            batch_processed_results[current_container_index].images[grid_index] = images_to_collect[i]
-                            
-                            prompt_index = i if batch_size > 1 else 0
-                            if prompt_index < len(processed_cell_result.all_prompts):
-                                batch_processed_results[current_container_index].all_prompts[grid_index] = processed_cell_result.all_prompts[prompt_index]
-                            else:
-                                batch_processed_results[current_container_index].all_prompts[grid_index] = processed_cell_result.prompt
+                    all_cell_images.extend(lone_imgs)
+                    all_cell_infotexts.extend(get_meta(processed_cell_result.infotexts, getattr(processed_cell_result, 'info', "")))
+                    all_cell_prompts.extend(get_meta(processed_cell_result.all_prompts, getattr(processed_cell_result, 'prompt', "")))
+                    all_cell_seeds.extend(get_meta(processed_cell_result.all_seeds, getattr(processed_cell_result, 'seed', -1)))
+                    all_cell_subseeds.extend(get_meta(getattr(processed_cell_result, 'all_subseeds', []), getattr(processed_cell_result, 'subseed', -1)))
+                    all_cell_negative_prompts.extend(get_meta(getattr(processed_cell_result, 'all_negative_prompts', []), getattr(processed_cell_result, 'negative_prompt', "")))
 
-                            batch_processed_results[current_container_index].all_seeds[grid_index] = processed_cell_result.all_seeds[prompt_index]
-                            batch_processed_results[current_container_index].infotexts[grid_index] = processed_cell_result.infotexts[prompt_index]
-                            if prompt_index < len(processed_cell_result.all_negative_prompts):
-                                batch_processed_results[current_container_index].all_negative_prompts[grid_index] = processed_cell_result.all_negative_prompts[prompt_index]
-                            if prompt_index < len(processed_cell_result.all_subseeds):
-                                batch_processed_results[current_container_index].all_subseeds[grid_index] = processed_cell_result.all_subseeds[prompt_index]
+    if not all_cell_images:
+        return Processed(p, [])
 
-    # --- 2. 収集した画像から、グリッドとサブグリッドを組み立てる ---
-    
-    final_z_grids = []
-    final_z_grids_infotexts = []
-    final_xy_sub_grids = []
-    final_xy_sub_grids_infotexts = []
+    final_grids = []
+    final_grids_infos = []
 
-    for i, res in enumerate(batch_processed_results):
-        valid_images = [img for img in res.images if img is not None]
-        if not valid_images: continue
+    if split_grids_by_batch and batch_size > 1:
+        # ===== バッチ分割ONの場合 =====
+        for batch_idx in range(batch_size):
+            batch_images = []
+            batch_infos = []
+            for cell_idx in range(num_cells_total):
+                idx = (cell_idx * batch_size) + batch_idx
+                if idx < len(all_cell_images):
+                    batch_images.append(all_cell_images[idx])
+                    batch_infos.append(all_cell_infotexts[idx])
 
+            if not batch_images:
+                continue
+
+            if len(zs) > 1:
+                z_slice_grids = []
+                for iz in range(len(zs)):
+                    start = iz * len(xs) * len(ys)
+                    end = start + len(xs) * len(ys)
+                    slice_imgs = batch_images[start:end]
+                    sub_grid = images.image_grid(slice_imgs, rows=len(ys))
+                    if draw_legend_x or draw_legend_y:
+                        hor_texts = [[images.GridAnnotation(x)] for x in x_labels] if draw_legend_x else [[images.GridAnnotation()] for _ in x_labels]
+                        ver_texts = [[images.GridAnnotation(y)] for y in y_labels] if draw_legend_y else [[images.GridAnnotation()] for _ in y_labels]
+                        grid_max_w, grid_max_h = map(max, zip(*(img.size for img in slice_imgs)))
+                        sub_grid = images.draw_grid_annotations(sub_grid, grid_max_w, grid_max_h, hor_texts, ver_texts, margin_size)
+                    z_slice_grids.append(sub_grid)
+
+                z_grid = images.image_grid(z_slice_grids, rows=1)
+                if draw_legend_z or draw_legend_batch:
+                    z_texts = [[images.GridAnnotation(z)] for z in z_labels] if draw_legend_z else [[images.GridAnnotation()] for _ in z_labels]
+                    batch_texts = [[images.GridAnnotation(f"Batch #{batch_idx+1}")]] if draw_legend_batch else [[images.GridAnnotation()]]
+                    grid_max_w, grid_max_h = map(max, zip(*(img.size for img in z_slice_grids)))
+                    z_grid = images.draw_grid_annotations(z_grid, grid_max_w, grid_max_h, z_texts, batch_texts)
+                
+                final_grids.append(z_grid)
+                final_grids_infos.append(batch_infos[0] if batch_infos else "")
+            else:
+                grid = images.image_grid(batch_images, rows=len(ys))
+                if draw_legend_x or draw_legend_y:
+                    hor_texts = [[images.GridAnnotation(x)] for x in x_labels] if draw_legend_x else [[images.GridAnnotation()] for _ in x_labels]
+                    ver_texts = [[images.GridAnnotation(y)] for y in y_labels] if draw_legend_y else [[images.GridAnnotation()] for _ in y_labels]
+                    grid_max_w, grid_max_h = map(max, zip(*(img.size for img in batch_images)))
+                    grid = images.draw_grid_annotations(grid, grid_max_w, grid_max_h, hor_texts, ver_texts, margin_size)
+                
+                final_grids.append(grid)
+                final_grids_infos.append(batch_infos[0] if batch_infos else "")
+
+        # 最終結果の組み立て（グリッド ＋ 全個別画像）
+        final_processed = processed_template
+        final_processed.images = final_grids + all_cell_images
+        
+        num_grids = len(final_grids)
+        fallback_info = all_cell_infotexts[0] if all_cell_infotexts else ""
+        fallback_prompt = all_cell_prompts[0] if all_cell_prompts else ""
+        fallback_seed = all_cell_seeds[0] if all_cell_seeds else -1
+
+        final_processed.infotexts = ([fallback_info] * num_grids) + all_cell_infotexts
+        final_processed.all_prompts = ([fallback_prompt] * num_grids) + all_cell_prompts
+        final_processed.all_seeds = ([fallback_seed] * num_grids) + all_cell_seeds
+        final_processed.all_subseeds = ([-1] * num_grids) + all_cell_subseeds
+        final_processed.all_negative_prompts = ([""] * num_grids) + all_cell_negative_prompts
+        
+        final_processed.index_of_first_image = num_grids # ギャラリーの分割点
+
+        return final_processed
+
+    else:
+        # ===== バッチ分割OFFの場合 (標準XYZと同じ挙動) =====
+        batch_images = []
+        for cell_idx in range(num_cells_total):
+            idx = cell_idx * batch_size
+            if idx < len(all_cell_images):
+                batch_images.append(all_cell_images[idx])
+        
         if len(zs) > 1:
             z_slice_grids = []
             for iz in range(len(zs)):
                 start = iz * len(xs) * len(ys)
                 end = start + len(xs) * len(ys)
-                
-                sub_grid = images.image_grid(res.images[start:end], rows=len(ys))
-                
+                slice_imgs = batch_images[start:end]
+                sub_grid = images.image_grid(slice_imgs, rows=len(ys))
                 if draw_legend_x or draw_legend_y:
                     hor_texts = [[images.GridAnnotation(x)] for x in x_labels] if draw_legend_x else [[images.GridAnnotation()] for _ in x_labels]
                     ver_texts = [[images.GridAnnotation(y)] for y in y_labels] if draw_legend_y else [[images.GridAnnotation()] for _ in y_labels]
-                    
-                    valid_sub_images = [img for img in res.images[start:end] if img is not None]
-                    if valid_sub_images:
-                        grid_max_w, grid_max_h = map(max, zip(*(img.size for img in valid_sub_images)))
-                        sub_grid = images.draw_grid_annotations(sub_grid, grid_max_w, grid_max_h, hor_texts, ver_texts, margin_size)
-                
+                    grid_max_w, grid_max_h = map(max, zip(*(img.size for img in slice_imgs)))
+                    sub_grid = images.draw_grid_annotations(sub_grid, grid_max_w, grid_max_h, hor_texts, ver_texts, margin_size)
                 z_slice_grids.append(sub_grid)
 
-                if include_sub_grids:
-                    final_xy_sub_grids.append(sub_grid)
-                    info_p = copy(p)
-                    info_p.extra_generation_params = copy(p.extra_generation_params)
-                    
-                    if split_grids_by_batch and batch_size > 1:
-                        info_p.extra_generation_params["Batch grid index"] = i + 1
-                    
-                    info_p.extra_generation_params["Z-Value"] = z_labels[iz]
-                    
-                    sub_grid_infotext = processing.create_infotext(info_p, [res.all_prompts[start]], [res.all_seeds[start]], [res.all_subseeds[start]], all_negative_prompts=[res.all_negative_prompts[start]])
-                    final_xy_sub_grids_infotexts.append(sub_grid_infotext)
-
             z_grid = images.image_grid(z_slice_grids, rows=1)
-            
-            z_texts = [[images.GridAnnotation(z)] for z in z_labels] if draw_legend_z else [[images.GridAnnotation()] for _ in z_labels]
-            batch_texts = [[images.GridAnnotation(f"Batch #{i+1}")]] if draw_legend_batch and split_grids_by_batch and batch_size > 1 else [[images.GridAnnotation()]]
-            
-            if draw_legend_z or (draw_legend_batch and split_grids_by_batch and batch_size > 1):
-                valid_z_grids = [img for img in z_slice_grids if img is not None]
-                if valid_z_grids:
-                    grid_max_w, grid_max_h = map(max, zip(*(img.size for img in valid_z_grids)))
-                    z_grid = images.draw_grid_annotations(z_grid, grid_max_w, grid_max_h, z_texts, batch_texts)
-            
-            final_z_grids.append(z_grid)
-            z_grid_infotext = processing.create_infotext(p, [res.all_prompts[0]], [res.all_seeds[0]], [res.all_subseeds[0]], all_negative_prompts=[res.all_negative_prompts[0]])
-            final_z_grids_infotexts.append(z_grid_infotext)
-
+            if draw_legend_z:
+                z_texts = [[images.GridAnnotation(z)] for z in z_labels] if draw_legend_z else [[images.GridAnnotation()] for _ in z_labels]
+                grid_max_w, grid_max_h = map(max, zip(*(img.size for img in z_slice_grids)))
+                z_grid = images.draw_grid_annotations(z_grid, grid_max_w, grid_max_h, z_texts, [[images.GridAnnotation()]])
+            final_grids.append(z_grid)
         else:
-            grid = images.image_grid(res.images, rows=len(ys))
+            grid = images.image_grid(batch_images, rows=len(ys))
             if draw_legend_x or draw_legend_y:
                 hor_texts = [[images.GridAnnotation(x)] for x in x_labels] if draw_legend_x else [[images.GridAnnotation()] for _ in x_labels]
                 ver_texts = [[images.GridAnnotation(y)] for y in y_labels] if draw_legend_y else [[images.GridAnnotation()] for _ in y_labels]
-                grid_max_w, grid_max_h = map(max, zip(*(img.size for img in valid_images)))
+                grid_max_w, grid_max_h = map(max, zip(*(img.size for img in batch_images)))
                 grid = images.draw_grid_annotations(grid, grid_max_w, grid_max_h, hor_texts, ver_texts, margin_size)
+            final_grids.append(grid)
 
-            final_z_grids.append(grid)
-            z_grid_infotext = processing.create_infotext(p, [res.all_prompts[0]], [res.all_seeds[0]], [res.all_subseeds[0]], all_negative_prompts=[res.all_negative_prompts[0]])
-            final_z_grids_infotexts.append(z_grid_infotext)
-
-    # --- 3. 最終的な結果を統合して返す ---
-    
-    if not processed_template:
-        return Processed(p, [])
-
-    final_processed = processed_template
-    
-    if include_sub_grids:
-        final_processed.images = final_z_grids + final_xy_sub_grids
-        final_processed.infotexts = final_z_grids_infotexts + final_xy_sub_grids_infotexts
+        final_processed = processed_template
+        final_processed.images = final_grids + all_cell_images
         
-        if not (split_grids_by_batch and batch_size > 1):
-            final_processed.index_of_first_image = 1 + (len(zs) if len(zs)>1 else 0)
-        else:
-            final_processed.index_of_first_image = 0
-            
-    else:
-        final_processed.images = final_z_grids
-        final_processed.infotexts = final_z_grids_infotexts
-        final_processed.index_of_first_image = 0
-        
-    final_processed.all_prompts = [res.all_prompts[0] for res in batch_processed_results]
-    final_processed.all_seeds = [res.all_seeds[0] for res in batch_processed_results]
-    
-    return final_processed
+        num_grids = len(final_grids)
+        fallback_info = all_cell_infotexts[0] if all_cell_infotexts else ""
+        fallback_prompt = all_cell_prompts[0] if all_cell_prompts else ""
+        fallback_seed = all_cell_seeds[0] if all_cell_seeds else -1
 
+        final_processed.infotexts = ([fallback_info] * num_grids) + all_cell_infotexts
+        final_processed.all_prompts = ([fallback_prompt] * num_grids) + all_cell_prompts
+        final_processed.all_seeds = ([fallback_seed] * num_grids) + all_cell_seeds
+        final_processed.all_subseeds = ([-1] * num_grids) + all_cell_subseeds
+        final_processed.all_negative_prompts = ([""] * num_grids) + all_cell_negative_prompts
+        
+        final_processed.index_of_first_image = num_grids
+
+        return final_processed
 
 def apply_xyz_patch(original_xyz_grid_module, original_script_class):
     """
@@ -207,18 +205,14 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
     パッチ適用済みのUIおよびRUN関数を定義して差し替える
     """
 
-    # --- `patched_ui` と `patched_run` を、このスコープ内で定義 ---
-    # これにより、`original_xyz_grid_module` をクロージャとしてキャプチャできる
-
     def patched_ui(self, is_img2img):
         """
-        パッチを適用する新しい UI 関数。
+        パッチを適用する UI 関数。
         """
         if not original_xyz_grid_module:
-            print("[XYZ Plot Mods] Cannot create UI: original_xyz_grid_module not loaded.")
             return []
         
-        self.current_axis_options = [x for x in original_xyz_grid_module.axis_options if type(x) == original_xyz_grid_module.AxisOption or x.is_img2img == is_img2img]
+        self.current_axis_options = [x for x in original_xyz_grid_module.axis_options if type(x) == original_xyz_grid_module.AxisOption or getattr(x, 'is_img2img', False) == is_img2img]
 
         with gr.Row():
             with gr.Column(scale=19):
@@ -332,13 +326,10 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
         パッチを適用する新しい run 関数。
         """
         if not original_xyz_grid_module:
-            print("[XYZ Plot Mods] Cannot run patch: original_xyz_grid_module not loaded.")
             return Processed(p, [])
         
         x_type, y_type, z_type = x_type or 0, y_type or 0, z_type or 0
-
         if not no_fixed_seeds: processing.fix_seed(p)
-
         if not opts.return_grid: p.batch_size = 1
         
         list_to_csv_string = original_xyz_grid_module.list_to_csv_string
@@ -353,7 +344,6 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
 
         def process_axis(opt, vals, vals_dropdown):
             if opt.label == 'Nothing': return [0]
-
             if opt.choices is not None and not csv_mode: valslist = vals_dropdown
             elif opt.prepare is not None: valslist = opt.prepare(vals)
             else: valslist = csv_string_to_list_strip(vals)
@@ -395,7 +385,7 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
 
         Image.MAX_IMAGE_PIXELS = None
         grid_mp = round(len(xs) * len(ys) * len(zs) * p.width * p.height / 1000000)
-        assert grid_mp < opts.img_max_size_mp, f'Error: Resulting grid would be too large ({grid_mp} MPixels) (max configured size is {opts.img_max_size_mp} MPixels)'
+        assert grid_mp < opts.img_max_size_mp, f'Error: Resulting grid would be too large ({grid_mp} MPixels)'
 
         def fix_axis_seeds(axis_opt, axis_list):
             if axis_opt.label in ['Seed', 'Var. seed']: return [int(random.randrange(4294967294)) if val is None or val == '' or val == -1 else val for val in axis_list]
@@ -403,22 +393,7 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
         if not no_fixed_seeds:
             xs = fix_axis_seeds(x_opt, xs); ys = fix_axis_seeds(y_opt, ys); zs = fix_axis_seeds(z_opt, zs)
 
-        if x_opt.label == 'Steps': total_steps = sum(xs) * len(ys) * len(zs)
-        elif y_opt.label == 'Steps': total_steps = sum(ys) * len(xs) * len(zs)
-        elif z_opt.label == 'Steps': total_steps = sum(zs) * len(xs) * len(ys)
-        else: total_steps = p.steps * len(xs) * len(ys) * len(zs)
-        if isinstance(p, StableDiffusionProcessingTxt2Img) and p.enable_hr:
-            if x_opt.label == "Hires steps": total_steps += sum(xs) * len(ys) * len(zs)
-            elif y_opt.label == "Hires steps": total_steps += sum(ys) * len(xs) * len(zs)
-            elif z_opt.label == "Hires steps": total_steps += sum(zs) * len(xs) * len(ys)
-            elif p.hr_second_pass_steps: total_steps += p.hr_second_pass_steps * len(xs) * len(ys) * len(zs)
-            else: total_steps *= 2
-        total_steps *= p.n_iter
         image_cell_count = p.n_iter * p.batch_size
-        cell_console_text = f"; {image_cell_count} images per cell" if image_cell_count > 1 else ""
-        plural_s = 's' if len(zs) > 1 else ''; print(f"X/Y/Z plot will create {len(xs) * len(ys) * len(zs) * image_cell_count} images on {len(zs)} {len(xs)}x{len(ys)} grid{plural_s}{cell_console_text}. (Total steps to process: {total_steps})")
-        shared.total_tqdm.updateTotal(total_steps)
-
         state.xyz_plot_x = AxisInfo(x_opt, xs); state.xyz_plot_y = AxisInfo(y_opt, ys); state.xyz_plot_z = AxisInfo(z_opt, zs)
 
         grid_infotext = [None] * (1 + len(zs))
@@ -427,39 +402,21 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
             if shared.state.interrupted or state.stopping_generation: return Processed(p, [], p.seed, "")
             pc = copy(p)
             
-            # --- Forge/SDXL キャッシュ汚染 & 参照共有回避のための強力な初期化 (修正版) ---
-            # 1. キャッシュの完全消去
+            # --- Forge/SDXL 参照共有回避 ---
             pc.cached_c = [None, None]
             pc.cached_uc = [None, None]
             if hasattr(pc, 'cached_hr_c'):  pc.cached_hr_c = [None, None]
             if hasattr(pc, 'cached_hr_uc'): pc.cached_hr_uc = [None, None]
-            
-            # 2. ネットワークデータの参照切り離し
             pc.extra_network_data = None
-
-            # 3. プロンプト・シードリストの参照切り離しと安全な初期化
-            #    p.all_prompts が None の場合は、単一の prompt からリストを作成して初期化します。
-            #    これにより 'NoneType is not iterable' エラーを回避しつつ、参照共有を断ち切ります。
-            if p.all_prompts:
-                pc.all_prompts = list(p.all_prompts)
-            else:
-                pc.all_prompts = [p.prompt] * p.batch_size
-
-            if p.all_negative_prompts:
-                pc.all_negative_prompts = list(p.all_negative_prompts)
-            else:
-                pc.all_negative_prompts = [p.negative_prompt] * p.batch_size
-
-            if p.all_seeds:
-                pc.all_seeds = list(p.all_seeds)
-            else:
-                pc.all_seeds = [p.seed] * p.batch_size
-
-            if p.all_subseeds:
-                pc.all_subseeds = list(p.all_subseeds)
-            else:
-                pc.all_subseeds = [p.subseed] * p.batch_size
-            # -----------------------------------------------------------
+            if p.all_prompts: pc.all_prompts = list(p.all_prompts)
+            else: pc.all_prompts = [p.prompt] * p.batch_size
+            if p.all_negative_prompts: pc.all_negative_prompts = list(p.all_negative_prompts)
+            else: pc.all_negative_prompts = [p.negative_prompt] * p.batch_size
+            if p.all_seeds: pc.all_seeds = list(p.all_seeds)
+            else: pc.all_seeds = [p.seed] * p.batch_size
+            if p.all_subseeds: pc.all_subseeds = list(p.all_subseeds)
+            else: pc.all_subseeds = [p.subseed] * p.batch_size
+            # ---------------------------
 
             pc.styles = pc.styles[:]
             x_opt.apply(pc, x, xs); y_opt.apply(pc, y, ys); z_opt.apply(pc, z, zs)
@@ -467,6 +424,7 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
             if vary_seeds_x: pc.seed += ix
             if vary_seeds_y: pc.seed += iy * xdim
             if vary_seeds_z: pc.seed += iz * xdim * ydim
+            
             try: res = process_images(pc)
             except Exception as e: errors.display(e, "generating image for xyz plot"); res = Processed(p, [], p.seed, "")
             
@@ -474,14 +432,11 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
             if grid_infotext[subgrid_index] is None and ix == 0 and iy == 0:
                 pc.extra_generation_params = copy(pc.extra_generation_params); pc.extra_generation_params['Script'] = self.title()
                 if x_opt.label != 'Nothing': pc.extra_generation_params["X Type"] = x_opt.label; pc.extra_generation_params["X Values"] = x_values
-                if x_opt.label in ["Seed", "Var. seed"] and not no_fixed_seeds: pc.extra_generation_params["Fixed X Values"] = ", ".join([str(x) for x in xs])
                 if y_opt.label != 'Nothing': pc.extra_generation_params["Y Type"] = y_opt.label; pc.extra_generation_params["Y Values"] = y_values
-                if y_opt.label in ["Seed", "Var. seed"] and not no_fixed_seeds: pc.extra_generation_params["Fixed Y Values"] = ", ".join([str(y) for y in ys])
                 grid_infotext[subgrid_index] = processing.create_infotext(pc, pc.all_prompts, pc.all_seeds, pc.all_subseeds)
             if grid_infotext[0] is None and ix == 0 and iy == 0 and iz == 0:
                 pc.extra_generation_params = copy(pc.extra_generation_params)
                 if z_opt.label != 'Nothing': pc.extra_generation_params["Z Type"] = z_opt.label; pc.extra_generation_params["Z Values"] = z_values
-                if z_opt.label in ["Seed", "Var. seed"] and not no_fixed_seeds: pc.extra_generation_params["Fixed Z Values"] = ", ".join([str(z) for z in zs])
                 grid_infotext[0] = processing.create_infotext(pc, pc.all_prompts, pc.all_seeds, pc.all_subseeds)
             return res
 
@@ -490,122 +445,85 @@ def apply_xyz_patch(original_xyz_grid_module, original_script_class):
                 p.override_settings['grid_save'] = False
             
             processed = draw_xyz_grid_unified(
-                p, 
-                xs=xs, ys=ys, zs=zs, 
+                p, xs=xs, ys=ys, zs=zs, 
                 x_labels=[x_opt.format_value(p, x_opt, x) for x in xs], 
                 y_labels=[y_opt.format_value(p, y_opt, y) for y in ys], 
                 z_labels=[z_opt.format_value(p, z_opt, z) for z in zs], 
-                cell=cell, 
-                margin_size=margin_size, 
-                draw_legend_x=draw_legend_x, 
-                draw_legend_y=draw_legend_y, 
-                draw_legend_z=draw_legend_z, 
-                draw_legend_batch=draw_legend_batch,
-                include_sub_grids=include_sub_grids,
-                split_grids_by_batch=split_grids_by_batch
+                cell=cell, margin_size=margin_size, 
+                draw_legend_x=draw_legend_x, draw_legend_y=draw_legend_y, draw_legend_z=draw_legend_z, draw_legend_batch=draw_legend_batch,
+                include_sub_grids=include_sub_grids, split_grids_by_batch=split_grids_by_batch
             )
             
-            p.override_settings.pop('grid_save', None)
+            # Forge 固有のリフレッシュ処理
+            if hasattr(original_xyz_grid_module, 'refresh_loading_params_for_xyz_grid'):
+                original_xyz_grid_module.refresh_loading_params_for_xyz_grid()
 
+            p.override_settings.pop('grid_save', None)
             if not processed.images: return processed
             
-            if opts.grid_save:
-                num_images_to_save = len(processed.images)
-                num_prompts = len(processed.all_prompts)
-                num_seeds = len(processed.all_seeds)
-
-                for i in range(num_images_to_save):
-                    img_info = processed.infotexts[i] if i < len(processed.infotexts) else ""
-                    prompt_index = i % num_prompts if num_prompts > 0 else 0
-                    seed_index = i % num_seeds if num_seeds > 0 else 0
-                    
-                    images.save_image(
-                        processed.images[i], 
-                        p.outpath_grids, 
-                        "xyz_grid", 
-                        info=img_info, 
-                        extension=opts.grid_format, 
-                        prompt=processed.all_prompts[prompt_index], 
-                        seed=processed.all_seeds[seed_index], 
-                        grid=True, 
-                        p=p
-                    )
-            
+            # メイン/サブグリッドのメタデータ上書き
             if draw_grid:
                  num_infotexts_to_copy = min(len(processed.infotexts), 1 + len(zs))
                  processed.infotexts[:num_infotexts_to_copy] = grid_infotext[:num_infotexts_to_copy]
-            
+
+            # 個別画像（Include Sub Images）が不要な場合のフィルタリング
             if not include_lone_images:
-                 num_z_grids = 1 if not (split_grids_by_batch and p.batch_size > 1) else (p.batch_size if split_grids_by_batch else 1)
-                 num_xy_sub_grids = 0
-                 if include_sub_grids and len(zs) > 1:
-                     num_xy_sub_grids = len(zs) * num_z_grids
-                 num_grids_to_keep = num_z_grids + num_xy_sub_grids
+                 num_grids_to_keep = processed.index_of_first_image
                  processed.images = processed.images[:num_grids_to_keep]
                  processed.infotexts = processed.infotexts[:num_grids_to_keep]
-                 processed.all_prompts = processed.all_prompts[:num_z_grids]
-                 processed.all_seeds = processed.all_seeds[:num_z_grids]
+                 
+                 # メタデータも全てスライスして同期させる
+                 processed.all_prompts = processed.all_prompts[:num_grids_to_keep]
+                 processed.all_seeds = processed.all_seeds[:num_grids_to_keep]
+                 if hasattr(processed, 'all_subseeds'):
+                     processed.all_subseeds = processed.all_subseeds[:num_grids_to_keep]
+                 if hasattr(processed, 'all_negative_prompts'):
+                     processed.all_negative_prompts = processed.all_negative_prompts[:num_grids_to_keep]
+
+            # グリッド保存
+            if opts.grid_save:
+                for i in range(processed.index_of_first_image):
+                    images.save_image(processed.images[i], p.outpath_grids, "xyz_grid", info=processed.infotexts[i], extension=opts.grid_format, prompt=processed.all_prompts[i], seed=processed.all_seeds[i], grid=True, p=p)
 
             return processed
     
     # --- パッチ適用の本体 ---
     print("[XYZ Plot Mods] Applying patches...")
-    
-    # 1. 新しい描画関数を、オリジナルのモジュールに「追加」
     original_xyz_grid_module.draw_xyz_grid_unified = draw_xyz_grid_unified
-    
-    # 2. オリジナルの Script クラスの ui メソッドを差し替え
     original_script_class.ui = patched_ui
-    
-    # 3. オリジナルの Script クラスの run メソッドを差し替え
     original_script_class.run = patched_run
-    
     print("[XYZ Plot Mods] Patches applied successfully.")
 
 def on_scripts_loaded():
     """
     すべてのスクリプトが読み込まれた後に呼び出されるコールバック関数。
-    このタイミングでパッチを適用することで、UIの重複バグを回避する。
     """
     print("[XYZ Plot Mods] Initializing via callback...")
     try:
         target_module_names = {"xyz_grid.py", "xy_grid.py", "scripts.xyz_grid", "scripts.xy_grid"}
-        
         original_script_class = None
         original_xyz_grid_module = None
 
-        # 'modules.scripts' ではなく、インポートしたエイリアス 'scripts' を使用する
         if hasattr(scripts, "scripts_data") and isinstance(scripts.scripts_data, list):
             for data in scripts.scripts_data:
-        
-                if not hasattr(data, "script_class"):
-                    continue
-
+                if not hasattr(data, "script_class"): continue
                 module_name = data.script_class.__module__
-                
                 if module_name in target_module_names:
                     try:
                         original_script_class = data.script_class
-                        
-                        if hasattr(data, "module"):
-                             original_xyz_grid_module = data.module
-                        else:
-                            original_xyz_grid_module = importlib.import_module(module_name)
-                        
-                        print(f"[XYZ Plot Mods] Found original script! Class: {original_script_class}, Module: {original_xyz_grid_module.__name__}")
+                        original_xyz_grid_module = data.module if hasattr(data, "module") else importlib.import_module(module_name)
+                        print(f"[XYZ Plot Mods] Found original script! Class: {original_script_class}")
                         break 
                     except Exception as e:
-                        print(f"[XYZ Plot Mods] Found script '{module_name}' but failed to import/get module: {e}")
-                        original_script_class = None
-                        original_xyz_grid_module = None
+                        print(f"[XYZ Plot Mods] Error importing module: {e}")
                         
         if original_script_class and original_xyz_grid_module:
             apply_xyz_patch(original_xyz_grid_module, original_script_class)
         else:
-            print(f"[XYZ Plot Mods] Error: Could not find a compatible 'xyz_grid' script in 'modules.scripts.scripts_data'. Patch failed.")
+            print(f"[XYZ Plot Mods] Error: Could not find xyz_grid script.")
 
     except Exception as e:
-        print(f"[XYZ Plot Mods] Critical error during initialization: {e}")
+        print(f"[XYZ Plot Mods] Critical error: {e}")
         traceback.print_exc()
 
 # --- コールバックを登録 ---
