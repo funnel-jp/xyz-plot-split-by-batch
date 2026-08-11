@@ -26,3 +26,30 @@ Stable Diffusion WebUI (Forge / Forge Neo) の標準スクリプトである「X
 2. `Install from URL` タブを選択します。
 3. `URL for extension's git repository` にこのリポジトリの URL を入力し、`Install` をクリックします。
 4. インストール完了後、WebUI を再起動（Reload UI）します。
+
+# xyz-plot-split-by-batch
+
+An extended custom script for Stable Diffusion WebUI (Forge / Forge Neo) that splits X/Y/Z Plot grids by batch index when generating with a batch size greater than 1 (Batch size > 1).
+
+## Overview
+
+In the standard X/Y/Z Plot, setting Batch size to 2 or more combines all generated images into a single massive grid, making each individual image tiny and difficult to inspect.
+
+This custom script (X/Y/Z plot split by batch) generates a separate, full-sized grid for each batch index (1st image, 2nd image, etc.). This makes it much easier to compare and verify variations in composition, seeds, or parameters across batches.
+
+## Key Features
+* **Batch-Based Grid Splitting**
+  * When Batch size is set above 1, a separate comparison grid is saved for each batch image index.
+* **Independent Legend Control (Draw legend for X/Y)**
+  * Toggle legend labels independently for the X and Y axes.
+* **Newline Separator Input (Use newline separator)**
+  * Enter prompt values line-by-line instead of using commas (,).
+  * Easily set up "with vs. without" comparisons (e.g., Prompt S/R) by entering "", '', or creating an empty line (pressing Enter twice).
+* **Automatic 16:9 Aspect Ratio Layout**
+  * When using only the X-axis with Row Count = 0 (Auto), the script calculates margins and legend heights to automatically wrap images into a layout close to a 16:9 aspect ratio.
+
+## Installation
+1. Open the Extensions tab in WebUI.
+2. Select the Install from URL tab.
+3. Paste this repository's URL into URL for extension's git repository and click Install.
+4. After installation finishes, restart or reload the WebUI (Reload UI).
